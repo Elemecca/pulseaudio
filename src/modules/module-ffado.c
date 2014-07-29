@@ -93,15 +93,16 @@ int pa__init(pa_module* m) {
      * Initialize FFADO Device                                        *
      * ************************************************************** */
 
-    memset(&dev_info, 0, sizeof(ffado_device_info_t));
-    memset(&dev_opts, 0, sizeof(ffado_options_t));
+    memset(&dev_info, 0, sizeof(dev_info));
+    memset(&dev_opts, 0, sizeof(dev_opts));
 
-    dev_opts.sample_rate = -1;
+    dev_opts.sample_rate = 48000;
     if (pa_modargs_get_value_s32(args, "rate", &(dev_opts.sample_rate)) < 0
-            || dev_opts.sample_rate < -1) {
+            || dev_opts.sample_rate <= 0) {
         pa_log("invalid rate parameter");
         goto fail;
     }
+    pa_log_debug("using sample rate %d", dev_opts.sample_rate);
 
     dev_opts.period_size = 1024;
     if (pa_modargs_get_value_s32(args, "period", &(dev_opts.period_size)) < 0
@@ -109,6 +110,7 @@ int pa__init(pa_module* m) {
         pa_log("invalid period parameter");
         goto fail;
     }
+    pa_log_debug("using period size %d", dev_opts.period_size);
 
     dev_opts.nb_buffers = 3;
     if (pa_modargs_get_value_s32(args, "nperiods", &(dev_opts.nb_buffers)) < 0
@@ -116,7 +118,12 @@ int pa__init(pa_module* m) {
         pa_log("invalid nperiods parameter");
         goto fail;
     }
+    pa_log_debug("using %d periods of buffer", dev_opts.nb_buffers);
 
+    // some options copied from JACK
+    dev_opts.verbose = 10;
+    dev_opts.realtime = 0;
+    dev_opts.packetizer_priority = 98;
 
     pa_log_debug("initializing FFADO device");
 
