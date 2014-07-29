@@ -42,7 +42,6 @@ PA_MODULE_USAGE("");
 #define DEFAULT_SINK_NAME "firewire_out"
 
 static const char* const valid_modargs[] = {
-    "device",
     "nperiods",
     "period",
     "rate",
@@ -69,7 +68,6 @@ int pa__init(pa_module* m) {
     struct userdata *u = NULL;
     pa_modargs *args = NULL;
 
-    char *device_spec;
     ffado_device_info_t dev_info;
     ffado_options_t dev_opts;
 
@@ -95,15 +93,8 @@ int pa__init(pa_module* m) {
      * Initialize FFADO Device                                        *
      * ************************************************************** */
 
-    device_spec = (char*) pa_modargs_get_value(args, "device", NULL);
-    if (!device_spec) {
-        pa_log("device parameter is required");
-        goto fail;
-    }
-
-    dev_info.nb_device_spec_strings = 1;
-    dev_info.device_spec_strings = &device_spec;
-
+    memset(&dev_info, 0, sizeof(ffado_device_info_t));
+    memset(&dev_opts, 0, sizeof(ffado_options_t));
 
     dev_opts.sample_rate = -1;
     if (pa_modargs_get_value_s32(args, "rate", &(dev_opts.sample_rate)) < 0
@@ -127,7 +118,7 @@ int pa__init(pa_module* m) {
     }
 
 
-    pa_log_debug("initializing FFADO device %s", device_spec);
+    pa_log_debug("initializing FFADO device");
 
     u->dev = ffado_streaming_init(dev_info, dev_opts);
     if (!u->dev) {
@@ -250,7 +241,6 @@ int pa__init(pa_module* m) {
     pa_sink_new_data_set_sample_spec(&sink_data, &sink_spec);
     pa_sink_new_data_set_channel_map(&sink_data, &sink_map);
     pa_proplist_sets(sink_data.proplist, PA_PROP_DEVICE_API, "ffado");
-    pa_proplist_sets(sink_data.proplist, PA_PROP_DEVICE_STRING, device_spec);
 
 
     u->sink = pa_sink_new(m->core, &sink_data, PA_SINK_LATENCY);
