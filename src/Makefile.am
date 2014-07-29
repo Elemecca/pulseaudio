@@ -1344,6 +1344,11 @@ endif
 
 endif
 
+if HAVE_FFADO
+modlibexec_LTLIBRARIES += \
+		module-ffado.la
+endif
+
 if HAVE_GCONF
 modlibexec_LTLIBRARIES += \
 		module-gconf.la
@@ -1474,6 +1479,7 @@ SYMDEF_FILES = \
 		module-jackdbus-detect-symdef.h \
 		module-jack-sink-symdef.h \
 		module-jack-source-symdef.h \
+		module-ffado-symdef.h \
 		module-volume-restore-symdef.h \
 		module-device-manager-symdef.h \
 		module-device-restore-symdef.h \
@@ -2057,6 +2063,12 @@ module_jack_source_la_SOURCES = modules/jack/module-jack-source.c
 module_jack_source_la_LDFLAGS = $(MODULE_LDFLAGS)
 module_jack_source_la_LIBADD = $(MODULE_LIBADD) $(JACK_LIBS)
 module_jack_source_la_CFLAGS = $(AM_CFLAGS) $(JACK_CFLAGS)
+
+# FFADO
+module_ffado_la_SOURCES = modules/module-ffado.c
+module_ffado_la_LDFLAGS = $(MODULE_LDFLAGS)
+module_ffado_la_LIBADD = $(MODULE_LIBADD) $(FFADO_LIBS)
+module_ffado_la_CFLAGS = $(AM_CFLAGS) $(FFADO_CFLAGS)
 
 module_hal_detect_la_SOURCES = modules/module-hal-detect-compat.c
 module_hal_detect_la_LIBADD = $(MODULE_LIBADD)

@@ -917,6 +917,22 @@ AS_IF([test "x$enable_jack" = "xyes" && test "x$HAVE_JACK" = "x0"],
 
 AM_CONDITIONAL([HAVE_JACK], [test "x$HAVE_JACK" = x1])
 
+#### FFADO (optional) ####
+
+AC_ARG_ENABLE([ffado],
+    AS_HELP_STRING([--disable-ffado],[Disable optional FFADO support]))
+
+AS_IF([test "x$enable_ffado" != "xno"],
+    [PKG_CHECK_MODULES(FFADO, [ libffado >= 2.0.1 ], HAVE_FFADO=1, HAVE_FFADO=0)],
+    HAVE_FFADO=0)
+
+AS_IF([test "x$enable_ffado" != "xyes" && test "x$HAVE_FFADO" = "x0"],
+    [AC_MSG_ERROR([*** FFADO support not found])])
+
+AC_SUBST(FFADO_CFLAGS)
+AC_SUBST(FFADO_LIBS)
+AM_CONDITIONAL([HAVE_FFADO], [test "x$HAVE_FFADO" = "x1"])
+
 #### Async DNS support (optional) ####
 
 AC_ARG_ENABLE([asyncns],
@@ -1499,6 +1515,7 @@ AS_IF([test "x$HAVE_GTK30" = "x1"], ENABLE_GTK30=yes, ENABLE_GTK30=no)
 AS_IF([test "x$HAVE_GCONF" = "x1"], ENABLE_GCONF=yes, ENABLE_GCONF=no)
 AS_IF([test "x$HAVE_AVAHI" = "x1"], ENABLE_AVAHI=yes, ENABLE_AVAHI=no)
 AS_IF([test "x$HAVE_JACK" = "x1"], ENABLE_JACK=yes, ENABLE_JACK=no)
+AS_IF([test "x$HAVE_FFADO" = "x1"], ENABLE_FFADO=yes, ENABLE_FFADO=no)
 AS_IF([test "x$HAVE_LIBASYNCNS" = "x1"], ENABLE_LIBASYNCNS=yes, ENABLE_LIBASYNCNS=no)
 AS_IF([test "x$HAVE_LIRC" = "x1"], ENABLE_LIRC=yes, ENABLE_LIRC=no)
 AS_IF([test "x$HAVE_XEN" = "x1"], ENABLE_XEN=yes, ENABLE_XEN=no)
@@ -1557,6 +1574,7 @@ echo "
     Enable GConf:                  ${ENABLE_GCONF}
     Enable Avahi:                  ${ENABLE_AVAHI}
     Enable Jack:                   ${ENABLE_JACK}
+    Enable FFADO:                  ${ENABLE_FFADO}
     Enable Async DNS:              ${ENABLE_LIBASYNCNS}
     Enable LIRC:                   ${ENABLE_LIRC}
     Enable Xen PV driver:          ${ENABLE_XEN}
