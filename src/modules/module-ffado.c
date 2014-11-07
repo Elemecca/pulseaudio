@@ -28,9 +28,13 @@
 
 #include <pulse/xmalloc.h>
 
-#include <pulsecore/module.h>
 #include <pulsecore/modargs.h>
+#include <pulsecore/module.h>
+#include <pulsecore/rtpoll.h>
+#include <pulsecore/sample-util.h>
 #include <pulsecore/sink.h>
+#include <pulsecore/thread-mq.h>
+#include <pulsecore/thread.h>
 
 #include "module-ffado-symdef.h"
 
@@ -48,21 +52,147 @@ static const char* const valid_modargs[] = {
     "sink_channel_map",
     "sink_channels",
     "sink_name",
+    "verbose",
     NULL
 };
 
-struct sink_channel {
-    int channel;
-    float *buffer;
+struct userdata {
+    pa_core *core;
+    pa_module *module;
+
+    ffado_device_t *dev;
+
+    pa_sink *sink;
+    unsigned sink_channels;
+    void *sink_buffer[PA_CHANNELS_MAX];
+    int sink_channel_map[PA_CHANNELS_MAX];
+
+    pa_thread_mq thread_mq;
+    pa_asyncmsgq *io_msgq;
+    pa_rtpoll *rtpoll;
+    pa_rtpoll_item *rtpoll_io_msgq;
+
+    pa_thread *io_thread;
+    pa_thread *msg_thread;
 };
 
-struct userdata {
-    ffado_device_t *dev;
-    pa_sink *sink;
-    int sink_channel_count;
-    // null-terminated array of channel structures
-    struct sink_channel *sink_channels;
+enum {
+    SINK_MESSAGE_RENDER = PA_SINK_MESSAGE_MAX,
+    SINK_MESSAGE_SHUTDOWN,
 };
+
+
+static int sink_process_msg (pa_msgobject *o, int code, void *data, int64_t offset, pa_memchunk *memchunk) {
+    struct userdata *u = PA_SINK(o)->userdata;
+
+    switch (code) {
+    case SINK_MESSAGE_RENDER:
+        if (PA_SINK_IS_OPENED(u->sink->thread_info.state)) {
+            pa_memchunk chunk;
+            size_t nbytes;
+            void *p;
+
+            pa_assert(offset > 0);
+            nbytes = (size_t) offset * pa_frame_size(&u->sink->sample_spec);
+
+            pa_sink_render_full(u->sink, nbytes, &chunk);
+
+            p = pa_memblock_acquire_chunk(&chunk);
+            pa_deinterleave(p, u->sink_buffer, u->sink_channels, sizeof(float), (unsigned) offset);
+            pa_memblock_release(chunk.memblock);
+            pa_memblock_unref(chunk.memblock);
+        } else {
+            unsigned c;
+            pa_sample_spec ss;
+
+            ss = u->sink->sample_spec;
+            ss.channels = 1;
+
+            for (c = 0; c < u->sink_channels; c++)
+                pa_silence_memory(u->sink_buffer[c], (size_t) offset * pa_sample_size(&ss), &ss);
+        }
+
+        ffado_streaming_transfer_buffers(u->dev);
+        return 0;
+
+    case SINK_MESSAGE_SHUTDOWN:
+        pa_asyncmsgq_post(u->thread_mq.outq, PA_MSGOBJECT(u->core), PA_CORE_MESSAGE_UNLOAD_MODULE, u->module, 0, NULL, NULL);
+        return 0;
+    }
+
+    return pa_sink_process_msg(o, code, data, offset, memchunk);
+}
+
+
+static void io_thread_func(void *userdata) {
+    struct userdata *u = userdata;
+    pa_assert(u);
+
+    pa_log_debug("IO thread starting up");
+
+    if (u->core->realtime_scheduling)
+        pa_make_realtime(u->core->realtime_priority);
+
+    pa_log_debug("starting FFADO streams");
+    if (ffado_streaming_start(u->dev) < 0) {
+        pa_log("error starting FFADO");
+        goto finish;
+    }
+
+    for (;;) {
+        ffado_wait_response response = ffado_streaming_wait(u->dev);
+
+        if (PA_UNLIKELY(ffado_wait_shutdown == response))
+            goto finish;
+
+        if (PA_UNLIKELY(ffado_wait_error == response)) {
+            /* TODO: figure out what we're supposed to do here */
+            goto finish;
+        }
+
+        pa_assert_se(0 == pa_asyncmsgq_send(u->io_msgq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_RENDER, NULL, 0, NULL));
+    }
+
+finish:
+    pa_asyncmsgq_post(u->io_msgq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_SHUTDOWN, NULL, 0, NULL, NULL);
+    pa_log_debug("IO thread shutting down");
+}
+
+
+static void msg_thread_func(void *userdata) {
+    struct userdata *u = userdata;
+    pa_assert(u);
+
+    pa_log_debug("message handling thread starting up");
+
+    if (u->core->realtime_scheduling)
+        pa_make_realtime(u->core->realtime_priority);
+
+    pa_thread_mq_install(&u->thread_mq);
+
+    for (;;) {
+        int ret;
+
+        if (PA_UNLIKELY(u->sink->thread_info.rewind_requested))
+            pa_sink_process_rewind(u->sink, 0);
+
+        if ((ret = pa_rtpoll_run(u->rtpoll, TRUE)) < 0)
+            goto fail;
+
+        if (ret == 0)
+            goto finish;
+    }
+
+fail:
+    /* If this was no regular exit from the loop we have to continue
+     * processing messages until we received PA_MESSAGE_SHUTDOWN */
+    pa_asyncmsgq_post(u->thread_mq.outq, PA_MSGOBJECT(u->core), PA_CORE_MESSAGE_UNLOAD_MODULE, u->module, 0, NULL, NULL);
+    pa_asyncmsgq_wait_for(u->thread_mq.inq, PA_MESSAGE_SHUTDOWN);
+
+finish:
+    pa_log_debug("message handling thread shutting down");
+}
+
 
 int pa__init(pa_module* m) {
     struct userdata *u = NULL;
@@ -88,6 +218,14 @@ int pa__init(pa_module* m) {
     }
 
     m->userdata = u = pa_xnew0(struct userdata, 1);
+    u->module = m;
+    u->core = m->core;
+
+    u->rtpoll = pa_rtpoll_new();
+    pa_thread_mq_init( &u->thread_mq, m->core->mainloop, u->rtpoll );
+
+    u->io_msgq = pa_asyncmsgq_new( 0 );
+    u->rtpoll_io_msgq = pa_rtpoll_item_new_asyncmsgq_read( u->rtpoll, PA_RTPOLL_EARLY - 1, u->io_msgq );
 
     /* ************************************************************** *
      * Initialize FFADO Device                                        *
@@ -120,10 +258,14 @@ int pa__init(pa_module* m) {
     }
     pa_log_debug("using %d periods of buffer", dev_opts.nb_buffers);
 
-    // some options copied from JACK
-    dev_opts.verbose = 10;
-    dev_opts.realtime = 0;
-    dev_opts.packetizer_priority = 98;
+    dev_opts.verbose = 1;
+    if (pa_modargs_get_value_s32(args, "verbose", &(dev_opts.verbose)) < 0) {
+        pa_log("invalid verbose parameter");
+        goto fail;
+    }
+
+    dev_opts.realtime = u->core->realtime_scheduling;
+    dev_opts.packetizer_priority = u->core->realtime_priority;
 
     pa_log_debug("initializing FFADO device");
 
@@ -159,8 +301,6 @@ int pa__init(pa_module* m) {
 
     pa_log_debug("have %d FFADO sink streams", raw_sink_channels);
 
-    u->sink_channels = pa_xnew0(struct sink_channel, raw_sink_channels + 1);
-
     for (idx = 0; idx < raw_sink_channels; idx++) {
         if (ffado_stream_type_audio !=
                 ffado_streaming_get_playback_stream_type(u->dev, idx)
@@ -183,12 +323,11 @@ int pa__init(pa_module* m) {
                 goto fail;
             }
 
-            u->sink_channels[ dev_sink_channels ].channel = idx;
-            u->sink_channels[ dev_sink_channels ].buffer =
-                pa_xnew0(float, dev_opts.period_size);
+            u->sink_channel_map[dev_sink_channels] = idx;
+            u->sink_buffer[dev_sink_channels] = pa_xnew0(float, dev_opts.period_size);
 
             if (ffado_streaming_set_playback_stream_buffer(u->dev, idx,
-                    (char*) u->sink_channels[ dev_sink_channels ].buffer ) < 0) {
+                    (char*) u->sink_buffer[dev_sink_channels] ) < 0) {
                 pa_log("error setting buffer for FFADO sink stream %d", idx);
                 goto fail;
             }
@@ -232,7 +371,7 @@ int pa__init(pa_module* m) {
 
     pa_log_debug("initializing PulseAudio sink");
 
-    sink_spec.channels = u->sink_channel_count = (uint8_t) sink_channels;
+    sink_spec.channels = u->sink_channels = (uint8_t) sink_channels;
     sink_spec.rate = dev_opts.sample_rate;
     sink_spec.format = PA_SAMPLE_FLOAT32NE;
     pa_assert(pa_sample_spec_valid(&sink_spec));
@@ -258,6 +397,12 @@ int pa__init(pa_module* m) {
         goto fail;
     }
 
+    u->sink->parent.process_msg = sink_process_msg;
+    u->sink->userdata = u;
+
+    pa_sink_set_asyncmsgq( u->sink, u->thread_mq.inq );
+    pa_sink_set_rtpoll( u->sink, u->rtpoll );
+
     /* ************************************************************** *
      * Initialize Source                                              *
      * ************************************************************** */
@@ -277,6 +422,20 @@ int pa__init(pa_module* m) {
         }
     }
 
+    /* *************************************************************** *
+     * Start Everything Up                                             *
+     * *************************************************************** */
+
+    if (!(u->msg_thread = pa_thread_new("ffado-msg", msg_thread_func, u))) {
+        pa_log("failed to create message handling thread");
+        goto fail;
+    }
+
+    if (!(u->io_thread = pa_thread_new("ffado-io", io_thread_func, u))) {
+        pa_log("failed to create IO thread");
+        goto fail;
+    }
+
     pa_modargs_free(args);
 
     return 0;
@@ -292,7 +451,7 @@ fail:
 
 void pa__done(pa_module* m) {
     struct userdata *u;
-    int idx;
+    unsigned idx;
 
     pa_assert(m);
     if (!(u = m->userdata))
@@ -306,16 +465,34 @@ void pa__done(pa_module* m) {
         ffado_streaming_finish(u->dev);
     }
 
+    if (u->io_thread) {
+        /* the IO thread will have received ffado_wait_shutdown
+         * and stopped when we called ffado_streaming_finish above. */
+        pa_thread_free(u->io_thread);
+    }
+
+    if (u->msg_thread) {
+        pa_asyncmsgq_send(u->thread_mq.inq, NULL, PA_MESSAGE_SHUTDOWN, NULL, 0, NULL);
+        pa_thread_free(u->msg_thread);
+    }
+
+    pa_thread_mq_done(&u->thread_mq);
+
     if (u->sink)
         pa_sink_unref(u->sink);
 
-    if (u->sink_channels) {
-        for (idx = 0; 0 != u->sink_channels[ idx ].channel; idx++) {
-            if (u->sink_channels[ idx ].buffer)
-                pa_xfree(u->sink_channels[ idx ].buffer);
-        }
+    if (u->rtpoll_io_msgq)
+        pa_rtpoll_item_free(u->rtpoll_io_msgq);
 
-        pa_xfree(u->sink_channels);
+    if (u->io_msgq)
+        pa_asyncmsgq_unref(u->io_msgq);
+
+    if (u->rtpoll)
+        pa_rtpoll_free(u->rtpoll);
+
+    for (idx = 0; idx < u->sink_channels; idx++) {
+        if (u->sink_buffer[idx])
+            pa_xfree(u->sink_buffer[idx]);
     }
 
     pa_xfree(u);
