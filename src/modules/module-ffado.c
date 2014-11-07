@@ -133,12 +133,6 @@ static void io_thread_func(void *userdata) {
     if (u->core->realtime_scheduling)
         pa_make_realtime(u->core->realtime_priority);
 
-    pa_log_debug("starting FFADO streams");
-    if (ffado_streaming_start(u->dev) < 0) {
-        pa_log("error starting FFADO");
-        goto finish;
-    }
-
     for (;;) {
         ffado_wait_response response = ffado_streaming_wait(u->dev);
 
@@ -425,6 +419,12 @@ int pa__init(pa_module* m) {
     /* *************************************************************** *
      * Start Everything Up                                             *
      * *************************************************************** */
+
+    pa_log_debug("starting FFADO streams");
+    if (ffado_streaming_start(u->dev) < 0) {
+        pa_log("error starting FFADO");
+        goto fail;
+    }
 
     if (!(u->msg_thread = pa_thread_new("ffado-msg", msg_thread_func, u))) {
         pa_log("failed to create message handling thread");
