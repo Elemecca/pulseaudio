@@ -74,6 +74,8 @@ struct userdata {
     pa_rtpoll *rtpoll;
     pa_rtpoll_item *rtpoll_io_msgq;
 
+    pa_mutex *suspend_lock;
+
     pa_thread *io_thread;
     pa_thread *msg_thread;
 };
@@ -131,6 +133,7 @@ static int sink_process_msg (pa_msgobject *o, int code, void *data, int64_t offs
         case PA_SINK_SUSPENDED:
             pa_assert(PA_SINK_IS_OPENED(u->sink->thread_info.state));
             pa_log_debug("stopping FFADO streaming on suspend");
+            pa_mutex_lock(u->suspend_lock);
             if (ffado_streaming_stop(u->dev)) {
                 pa_log("error stopping FFADO streaming on suspend");
                 return -1;
@@ -145,6 +148,7 @@ static int sink_process_msg (pa_msgobject *o, int code, void *data, int64_t offs
                     pa_log("error starting FFADO streaming on resume");
                     return -1;
                 }
+                pa_mutex_unlock(u->suspend_lock);
             }
             break;
 
@@ -169,6 +173,8 @@ static int sink_process_msg (pa_msgobject *o, int code, void *data, int64_t offs
 
 static void io_thread_func(void *userdata) {
     struct userdata *u = userdata;
+    ffado_wait_response response;
+
     pa_assert(u);
 
     pa_log_debug("IO thread starting up");
@@ -181,7 +187,13 @@ static void io_thread_func(void *userdata) {
     pa_assert_se(0 == pa_asyncmsgq_send(u->io_msgq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_READY, NULL, 0, NULL));
 
     for (;;) {
-        switch (ffado_streaming_wait(u->dev)) {
+        /* calling _wait while the device is not running causes an xrun
+         * the mutex prevents doing so while the sink is suspended */
+        pa_mutex_lock(u->suspend_lock);
+        response = ffado_streaming_wait(u->dev);
+        pa_mutex_unlock(u->suspend_lock);
+
+        switch (response) {
         case ffado_wait_ok:
             break;
 
@@ -281,6 +293,8 @@ int pa__init(pa_module* m) {
 
     u->io_msgq = pa_asyncmsgq_new( 0 );
     u->rtpoll_io_msgq = pa_rtpoll_item_new_asyncmsgq_read( u->rtpoll, PA_RTPOLL_EARLY - 1, u->io_msgq );
+
+    u->suspend_lock = pa_mutex_new(false, false);
 
     /* ************************************************************** *
      * Initialize FFADO Device                                        *
@@ -543,6 +557,10 @@ void pa__done(pa_module* m) {
     if (u->sink)
         pa_sink_unlink(u->sink);
 
+    if (u->suspend_lock)
+        /* prevent deadlock on shutdown while suspended */
+        pa_mutex_unlock(u->suspend_lock);
+
     if (u->dev) {
         ffado_streaming_stop(u->dev);
         ffado_streaming_finish(u->dev);
@@ -572,6 +590,9 @@ void pa__done(pa_module* m) {
 
     if (u->rtpoll)
         pa_rtpoll_free(u->rtpoll);
+
+    if (u->suspend_lock)
+        pa_mutex_free(u->suspend_lock);
 
     for (idx = 0; idx < u->sink_channels; idx++) {
         if (u->sink_buffer[idx])
