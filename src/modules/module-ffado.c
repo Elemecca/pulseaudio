@@ -61,7 +61,8 @@ struct userdata {
     pa_module *module;
 
     ffado_device_t *dev;
-    size_t buffer_size;
+    int32_t period_size;
+    pa_usec_t fixed_latency;
 
     pa_sink *sink;
     unsigned sink_channels;
@@ -119,10 +120,14 @@ static int sink_process_msg (pa_msgobject *o, int code, void *data, int64_t offs
             ss.channels = 1;
 
             for (c = 0; c < u->sink_channels; c++)
-                pa_silence_memory(u->sink_buffer[c], u->buffer_size, &ss);
+                pa_silence_memory(u->sink_buffer[c], (size_t) offset * pa_sample_size(&u->sink->sample_spec), &ss);
         }
 
         ffado_streaming_transfer_buffers(u->dev);
+        return 0;
+
+    case PA_SINK_MESSAGE_GET_LATENCY:
+        *((pa_usec_t*) data) = u->fixed_latency;
         return 0;
 
     case SINK_MESSAGE_SHUTDOWN:
@@ -172,7 +177,7 @@ static void io_thread_func(void *userdata) {
             goto finish;
         }
 
-        pa_assert_se(0 == pa_asyncmsgq_send(u->io_msgq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_RENDER, NULL, 0, NULL));
+        pa_assert_se(0 == pa_asyncmsgq_send(u->io_msgq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_RENDER, NULL, u->period_size, NULL));
     }
 
 finish:
@@ -271,6 +276,7 @@ int pa__init(pa_module* m) {
         goto fail;
     }
     pa_log_debug("using period size %d", dev_opts.period_size);
+    u->period_size = dev_opts.period_size;
 
     dev_opts.nb_buffers = 3;
     if (pa_modargs_get_value_s32(args, "nperiods", &(dev_opts.nb_buffers)) < 0
@@ -408,7 +414,6 @@ int pa__init(pa_module* m) {
     sink_spec.format = PA_SAMPLE_FLOAT32NE;
     pa_assert(pa_sample_spec_valid(&sink_spec));
 
-    u->buffer_size = (size_t) dev_opts.period_size * pa_sample_size(&sink_spec);
 
     pa_sink_new_data_init(&sink_data);
     sink_data.driver = __FILE__;
@@ -435,6 +440,10 @@ int pa__init(pa_module* m) {
 
     pa_sink_set_asyncmsgq( u->sink, u->thread_mq.inq );
     pa_sink_set_rtpoll( u->sink, u->rtpoll );
+    pa_sink_set_max_request(u->sink, u->period_size * pa_frame_size(&sink_spec));
+
+    u->fixed_latency = pa_bytes_to_usec(u->period_size * pa_frame_size(&sink_spec) * dev_opts.nb_buffers, &sink_spec);
+    pa_sink_set_fixed_latency(u->sink, u->fixed_latency);
 
     /* ************************************************************** *
      * Initialize Source                                              *
@@ -478,6 +487,8 @@ int pa__init(pa_module* m) {
         pa_log("failed to create IO thread");
         goto fail;
     }
+
+    pa_sink_put(u->sink);
 
     pa_modargs_free(args);
 
