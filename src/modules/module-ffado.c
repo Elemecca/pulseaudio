@@ -126,6 +126,34 @@ static int sink_process_msg (pa_msgobject *o, int code, void *data, int64_t offs
         ffado_streaming_transfer_buffers(u->dev);
         return 0;
 
+    case PA_SINK_MESSAGE_SET_STATE:
+        switch ((pa_sink_state_t) PA_PTR_TO_UINT(data)) {
+        case PA_SINK_SUSPENDED:
+            pa_assert(PA_SINK_IS_OPENED(u->sink->thread_info.state));
+            pa_log_debug("stopping FFADO streaming on suspend");
+            if (ffado_streaming_stop(u->dev)) {
+                pa_log("error stopping FFADO streaming on suspend");
+                return -1;
+            }
+            break;
+
+        case PA_SINK_IDLE:
+        case PA_SINK_RUNNING:
+            if (PA_SINK_SUSPENDED == u->sink->thread_info.state) {
+                pa_log_debug("starting FFADO streaming on resume");
+                if (ffado_streaming_start(u->dev) < 0) {
+                    pa_log("error starting FFADO streaming on resume");
+                    return -1;
+                }
+            }
+            break;
+
+        default:
+            /* don't care */
+            break;
+        }
+        break;
+
     case PA_SINK_MESSAGE_GET_LATENCY:
         *((pa_usec_t*) data) = u->fixed_latency;
         return 0;
