@@ -61,6 +61,7 @@ struct userdata {
     pa_module *module;
 
     ffado_device_t *dev;
+    size_t buffer_size;
 
     pa_sink *sink;
     unsigned sink_channels;
@@ -118,7 +119,7 @@ static int sink_process_msg (pa_msgobject *o, int code, void *data, int64_t offs
             ss.channels = 1;
 
             for (c = 0; c < u->sink_channels; c++)
-                pa_silence_memory(u->sink_buffer[c], (size_t) offset * pa_sample_size(&ss), &ss);
+                pa_silence_memory(u->sink_buffer[c], u->buffer_size, &ss);
         }
 
         ffado_streaming_transfer_buffers(u->dev);
@@ -407,6 +408,7 @@ int pa__init(pa_module* m) {
     sink_spec.format = PA_SAMPLE_FLOAT32NE;
     pa_assert(pa_sample_spec_valid(&sink_spec));
 
+    u->buffer_size = (size_t) dev_opts.period_size * pa_sample_size(&sink_spec);
 
     pa_sink_new_data_init(&sink_data);
     sink_data.driver = __FILE__;
