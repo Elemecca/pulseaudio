@@ -425,6 +425,7 @@ int pa__init(pa_module* m) {
     pa_sink_new_data_set_sample_spec(&sink_data, &sink_spec);
     pa_sink_new_data_set_channel_map(&sink_data, &sink_map);
     pa_proplist_sets(sink_data.proplist, PA_PROP_DEVICE_API, "ffado");
+    pa_proplist_sets(sink_data.proplist, PA_PROP_DEVICE_DESCRIPTION, "FireWire Audio Interface");
 
 
     u->sink = pa_sink_new(m->core, &sink_data, PA_SINK_LATENCY);
