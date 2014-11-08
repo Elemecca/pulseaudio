@@ -77,7 +77,8 @@ struct userdata {
 };
 
 enum {
-    SINK_MESSAGE_RENDER = PA_SINK_MESSAGE_MAX,
+    SINK_MESSAGE_READY = PA_SINK_MESSAGE_MAX,
+    SINK_MESSAGE_RENDER,
     SINK_MESSAGE_SHUTDOWN,
 };
 
@@ -86,6 +87,14 @@ static int sink_process_msg (pa_msgobject *o, int code, void *data, int64_t offs
     struct userdata *u = PA_SINK(o)->userdata;
 
     switch (code) {
+    case SINK_MESSAGE_READY:
+        pa_log_debug("starting FFADO streams");
+        if (ffado_streaming_start(u->dev) < 0) {
+            pa_log("error starting FFADO");
+            return -1;
+        }
+        return 0;
+
     case SINK_MESSAGE_RENDER:
         if (PA_SINK_IS_OPENED(u->sink->thread_info.state)) {
             pa_memchunk chunk;
@@ -133,14 +142,32 @@ static void io_thread_func(void *userdata) {
     if (u->core->realtime_scheduling)
         pa_make_realtime(u->core->realtime_priority);
 
-    for (;;) {
-        ffado_wait_response response = ffado_streaming_wait(u->dev);
+    /* ask the mq thread to bring up FFADO, then wait
+     * doing this ensures everyone is ready when it comes up */
+    pa_assert_se(0 == pa_asyncmsgq_send(u->io_msgq, PA_MSGOBJECT(u->sink), SINK_MESSAGE_READY, NULL, 0, NULL));
 
-        if (PA_UNLIKELY(ffado_wait_shutdown == response))
+    for (;;) {
+        switch (ffado_streaming_wait(u->dev)) {
+        case ffado_wait_ok:
+            break;
+
+        case ffado_wait_xrun:
+            /* handled xrun: process nothing this time, but otherwise OK */
+            continue;
+
+        case ffado_wait_error:
+            /* probably an unhandled xrun: try to restart */
+            if (ffado_streaming_reset(u->dev) < 0) {
+                pa_log("unable to recover from FFADO error; shutting down");
+                goto finish;
+            }
+            continue;
+
+        case ffado_wait_shutdown:
             goto finish;
 
-        if (PA_UNLIKELY(ffado_wait_error == response)) {
-            /* TODO: figure out what we're supposed to do here */
+        default:
+            pa_log("received nonsense return from ffado_streaming_wait; shutting down");
             goto finish;
         }
 
@@ -301,6 +328,11 @@ int pa__init(pa_module* m) {
                 ) {
             pa_log_debug("disabling non-audio FFADO sink stream %d", idx);
 
+            if (ffado_streaming_set_playback_stream_buffer(u->dev, idx, NULL) < 0) {
+                pa_log("error disabling non-audio FFADO sink stream %d buffer", idx);
+                goto fail;
+            }
+
             if (ffado_streaming_playback_stream_onoff(u->dev, idx, 0) < 0) {
                 pa_log("error disabling non-audio FFADO sink stream %d", idx);
                 goto fail;
@@ -327,6 +359,11 @@ int pa__init(pa_module* m) {
             }
         } else {
             pa_log_debug("not using FFADO sink stream %d", idx);
+
+            if (ffado_streaming_set_playback_stream_buffer(u->dev, idx, NULL) < 0) {
+                pa_log("error disabling unused FFADO sink stream %d buffer", idx);
+                goto fail;
+            }
 
             if (ffado_streaming_playback_stream_onoff(u->dev, idx, 0) < 0) {
                 pa_log("error disabling unused FFADO sink stream %d", idx);
@@ -410,6 +447,11 @@ int pa__init(pa_module* m) {
     }
 
     for (idx = 0; idx < raw_source_channels; idx++) {
+        if (ffado_streaming_set_capture_stream_buffer(u->dev, idx, NULL) < 0) {
+            pa_log("error disabling unused FFADO source stream %d buffer", idx);
+            goto fail;
+        }
+
         if (ffado_streaming_capture_stream_onoff(u->dev, idx, 0) < 0) {
             pa_log("error disabling unused FFADO source stream %d", idx);
             goto fail;
@@ -420,9 +462,8 @@ int pa__init(pa_module* m) {
      * Start Everything Up                                             *
      * *************************************************************** */
 
-    pa_log_debug("starting FFADO streams");
-    if (ffado_streaming_start(u->dev) < 0) {
-        pa_log("error starting FFADO");
+    if (ffado_streaming_prepare(u->dev) < 0) {
+        pa_log("error preparing FFADO for streaming");
         goto fail;
     }
 
